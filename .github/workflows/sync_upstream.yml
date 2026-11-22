@@ -1,0 +1,74 @@
+name: Sync Upstream Droid-ify
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Rebase onto Latest Upstream Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check & Rebase Upstream Release
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          LATEST_TAG=$(curl -sSf "https://api.github.com/repos/Droid-ify/client/releases/latest" | grep -oP '"tag_name"\s*:\s*"\K[^"]+')
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Could not resolve latest upstream tag."
+            exit 1
+          fi
+
+          git remote add upstream https://github.com/Droid-ify/client.git || true
+          git fetch upstream "refs/tags/${LATEST_TAG}:refs/tags/${LATEST_TAG}"
+
+          if git merge-base --is-ancestor "$LATEST_TAG" HEAD; then
+            echo "Already up to date with $LATEST_TAG."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New upstream release $LATEST_TAG detected! Rebasing..."
+          if git rebase "$LATEST_TAG"; then
+            git push --force-with-lease origin main
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Notify Conflict via ntfy
+        if: failure() && steps.sync.outputs.conflict == 'true'
+        env:
+          CLOUD_NTFY_TOPIC: ${{ secrets.CLOUD_NTFY_TOPIC || secrets.NTFY_TOPIC }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          LATEST_TAG: ${{ steps.sync.outputs.latest_tag }}
+        run: |
+          CLOUD_TOPIC="${CLOUD_NTFY_TOPIC#/}"
+          SERVER="${NTFY_URL:-https://ntfy.sh}"
+          SERVER="${SERVER%/}"
+          if [[ "$SERVER" =~ ^https?://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost|127\.) ]]; then
+            SERVER="https://ntfy.sh"
+          fi
+          if [ -n "$CLOUD_TOPIC" ]; then
+            curl -sS -X POST "$SERVER/$CLOUD_TOPIC" \
+              -H "Title: Droidify Upstream Rebase Conflict" \
+              -H "Priority: high" \
+              -H "Tags: warning,android" \
+              -H "Actions: view, View Run, ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              -d "Automatic rebase onto upstream ${LATEST_TAG} had conflicts. Please rebase manually in ~/Dev/Droid-ify." || true
+          fi

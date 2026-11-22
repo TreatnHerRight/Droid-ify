@@ -1,0 +1,232 @@
+name: Build Droidify APK
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - '.github/workflows/build_apk.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-runner:
+    name: Detect Active Runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runner: ${{ steps.check.outputs.runner }}
+      ntfy_target: ${{ steps.check.outputs.ntfy_target }}
+    steps:
+      - name: Check Self-Hosted Runner Status
+        id: check
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUNNER="ubuntu-latest"
+          NTFY_TARGET="cloud"
+
+          TOKEN="${RUNNER_PAT:-$GITHUB_TOKEN}"
+          RESPONSE=$(curl -s -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners" || echo "{}")
+
+          ONLINE_COUNT=$(echo "$RESPONSE" | grep -o '"status":"online"' | wc -l || echo "0")
+          if [ "$ONLINE_COUNT" -gt 0 ]; then
+            echo "Found $ONLINE_COUNT online self-hosted runner(s)."
+            RUNNER="self-hosted"
+            NTFY_TARGET="local"
+          else
+            echo "No online self-hosted runner found; falling back to ubuntu-latest."
+          fi
+
+          echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
+          echo "ntfy_target=$NTFY_TARGET" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build & Release APK
+    needs: detect-runner
+    runs-on: ${{ needs.detect-runner.outputs.runner }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Notify Build Started via ntfy
+        env:
+          LOCAL_NTFY_URL: ${{ secrets.LOCAL_NTFY_URL }}
+          LOCAL_NTFY_TOKEN: ${{ secrets.LOCAL_NTFY_TOKEN || secrets.NTFY_TOKEN }}
+          LOCAL_NTFY_TOPIC: ${{ secrets.LOCAL_NTFY_TOPIC || secrets.NTFY_TOPIC }}
+          CLOUD_NTFY_TOPIC: ${{ secrets.CLOUD_NTFY_TOPIC || secrets.NTFY_TOPIC }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TARGET: ${{ needs.detect-runner.outputs.ntfy_target }}
+          SELECTED_RUNNER: ${{ needs.detect-runner.outputs.runner }}
+        run: |
+          echo "start_time=$(date +%s)" >> "$GITHUB_ENV"
+          LOCAL_TOPIC="${LOCAL_NTFY_TOPIC#/}"
+          CLOUD_TOPIC="${CLOUD_NTFY_TOPIC#/}"
+          SERVER="${NTFY_URL:-https://ntfy.sh}"
+          SERVER="${SERVER%/}"
+          LOCAL_NTFY_URL="${LOCAL_NTFY_URL%/}"
+
+          if [ -z "$LOCAL_TOPIC" ] && [ -z "$CLOUD_TOPIC" ]; then
+            exit 0
+          fi
+
+          if [ "$SELECTED_RUNNER" = "ubuntu-latest" ] && [[ "$SERVER" =~ ^https?://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost|127\.) ]]; then
+            SERVER="https://ntfy.sh"
+          fi
+
+          SHORT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '${{ github.sha }}')"
+          TITLE="Droidify Build Started"
+          PRIORITY="low"
+          TAGS="hourglass_flowing_sand,android"
+          BODY="Started building Droidify (${SELECTED_RUNNER}) for commit ${SHORT_SHA} (${{ github.ref_name }})."
+          ACTION="view, View Run, ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "$NTFY_TARGET" = "local" ] && [ -n "$LOCAL_NTFY_URL" ] && [ -n "$LOCAL_TOPIC" ]; then
+            LOCAL_AUTH=()
+            if [ -n "$LOCAL_NTFY_TOKEN" ]; then LOCAL_AUTH=(-H "Authorization: Bearer $LOCAL_NTFY_TOKEN"); fi
+            HTTP_CODE=$(curl -sS --max-time 3 -o /tmp/ntfy_local.txt -w "%{http_code}" -X POST "$LOCAL_NTFY_URL/$LOCAL_TOPIC" \
+              "${LOCAL_AUTH[@]}" \
+              -H "Title: $TITLE" \
+              -H "Priority: $PRIORITY" \
+              -H "Tags: $TAGS" \
+              -H "Actions: $ACTION" \
+              -d "$BODY" || echo "ERR")
+            if [ "$HTTP_CODE" = "200" ]; then
+              exit 0
+            fi
+          fi
+
+          if [ -n "$CLOUD_TOPIC" ]; then
+            curl -sS -o /tmp/ntfy_cloud.txt -X POST "$SERVER/$CLOUD_TOPIC" \
+              -H "Title: $TITLE" \
+              -H "Priority: $PRIORITY" \
+              -H "Tags: $TAGS" \
+              -H "Actions: $ACTION" \
+              -d "$BODY" || true
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Sign Release APK
+        uses: r0adkll/sign-android-release@v1
+        id: sign_app
+        with:
+          releaseDirectory: app/build/outputs/apk/release
+          signingKeyBase64: ${{ secrets.KEY_BASE64 }}
+          alias: ${{ secrets.KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.KEYSTORE_PASS }}
+          keyPassword: ${{ secrets.KEYSTORE_PASS }}
+
+      - name: Package Versioned APK
+        id: pkg
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          APK_NAME="Droidify-v${VERSION_NAME}.apk"
+          mv "${{ steps.sign_app.outputs.signedReleaseFile }}" "$APK_NAME"
+          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "apk=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: Droidify ${{ steps.pkg.outputs.tag }}
+          files: ${{ steps.pkg.outputs.apk }}
+          generate_release_notes: true
+          make_latest: true
+          draft: false
+          prerelease: false
+
+      - name: Notify Build Completion via ntfy
+        if: always()
+        env:
+          LOCAL_NTFY_URL: ${{ secrets.LOCAL_NTFY_URL }}
+          LOCAL_NTFY_TOKEN: ${{ secrets.LOCAL_NTFY_TOKEN || secrets.NTFY_TOKEN }}
+          LOCAL_NTFY_TOPIC: ${{ secrets.LOCAL_NTFY_TOPIC || secrets.NTFY_TOPIC }}
+          CLOUD_NTFY_TOPIC: ${{ secrets.CLOUD_NTFY_TOPIC || secrets.NTFY_TOPIC }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          JOB_STATUS: ${{ job.status }}
+          NTFY_TARGET: ${{ needs.detect-runner.outputs.ntfy_target }}
+          SELECTED_RUNNER: ${{ needs.detect-runner.outputs.runner }}
+          APK_NAME: ${{ steps.pkg.outputs.apk }}
+        run: |
+          LOCAL_TOPIC="${LOCAL_NTFY_TOPIC#/}"
+          CLOUD_TOPIC="${CLOUD_NTFY_TOPIC#/}"
+          SERVER="${NTFY_URL:-https://ntfy.sh}"
+          SERVER="${SERVER%/}"
+          LOCAL_NTFY_URL="${LOCAL_NTFY_URL%/}"
+
+          if [ -z "$LOCAL_TOPIC" ] && [ -z "$CLOUD_TOPIC" ]; then
+            exit 0
+          fi
+
+          if [ "$SELECTED_RUNNER" = "ubuntu-latest" ] && [[ "$SERVER" =~ ^https?://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost|127\.) ]]; then
+            SERVER="https://ntfy.sh"
+          fi
+
+          END_TIME=$(date +%s)
+          START_TIME="${start_time:-$END_TIME}"
+          DURATION=$((END_TIME - START_TIME))
+          ELAPSED="$((DURATION / 60))m $((DURATION % 60))s"
+
+          SHORT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '${{ github.sha }}')"
+          if [ "$JOB_STATUS" = "success" ]; then
+            TITLE="Droidify Built Successfully"
+            PRIORITY="default"
+            TAGS="white_check_mark,android"
+            BODY="${APK_NAME:-Droidify APK} built on ${SELECTED_RUNNER} and published in ${ELAPSED} (${SHORT_SHA})."
+          else
+            TITLE="Droidify Build Failed"
+            PRIORITY="high"
+            TAGS="x,rotating_light,android"
+            BODY="Droidify build FAILED on ${SELECTED_RUNNER} after ${ELAPSED} (${SHORT_SHA})."
+          fi
+          ACTION="view, View Run, ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "$NTFY_TARGET" = "local" ] && [ -n "$LOCAL_NTFY_URL" ] && [ -n "$LOCAL_TOPIC" ]; then
+            LOCAL_AUTH=()
+            if [ -n "$LOCAL_NTFY_TOKEN" ]; then LOCAL_AUTH=(-H "Authorization: Bearer $LOCAL_NTFY_TOKEN"); fi
+            HTTP_CODE=$(curl -sS --max-time 3 -o /tmp/ntfy_local.txt -w "%{http_code}" -X POST "$LOCAL_NTFY_URL/$LOCAL_TOPIC" \
+              "${LOCAL_AUTH[@]}" \
+              -H "Title: $TITLE" \
+              -H "Priority: $PRIORITY" \
+              -H "Tags: $TAGS" \
+              -H "Actions: $ACTION" \
+              -d "$BODY" || echo "ERR")
+            if [ "$HTTP_CODE" = "200" ]; then
+              exit 0
+            fi
+          fi
+
+          if [ -n "$CLOUD_TOPIC" ]; then
+            curl -sS -o /tmp/ntfy_cloud.txt -X POST "$SERVER/$CLOUD_TOPIC" \
+              -H "Title: $TITLE" \
+              -H "Priority: $PRIORITY" \
+              -H "Tags: $TAGS" \
+              -H "Actions: $ACTION" \
+              -d "$BODY" || true
+          fi

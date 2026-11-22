@@ -31,14 +31,19 @@ import com.looker.droidify.utility.common.cache.Cache
 import com.looker.droidify.utility.common.extension.getDrawableCompat
 import com.looker.droidify.utility.common.extension.getInstalledPackagesCompat
 import com.looker.droidify.utility.extension.toInstalledItem
+import com.looker.droidify.work.AutoBackupManager
+import com.looker.droidify.work.AutoBackupWorker
 import com.looker.droidify.work.CleanUpWorker
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.OkHttpClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectIndexed
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -64,6 +69,9 @@ class Droidify : Application(), SingletonImageLoader.Factory, Configuration.Prov
 
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
+
+    @Inject
+    lateinit var autoBackupManager: AutoBackupManager
 
     override fun onCreate() {
         super.onCreate()
@@ -111,6 +119,7 @@ class Droidify : Application(), SingletonImageLoader.Factory, Configuration.Prov
         }
     }
 
+    @OptIn(FlowPreview::class)
     private fun updatePreference() {
         appScope.launch {
             launch {
@@ -132,6 +141,28 @@ class Droidify : Application(), SingletonImageLoader.Factory, Configuration.Prov
                         CleanUpWorker.scheduleCleanup(applicationContext, it)
                     }
                 }
+            }
+            launch {
+                autoBackupManager.enabled.collect { enabled ->
+                    if (enabled) {
+                        AutoBackupWorker.scheduleDaily(applicationContext)
+                    } else {
+                        AutoBackupWorker.cancel(applicationContext)
+                    }
+                }
+            }
+            launch {
+                combine(
+                    settingsRepository.get { favouriteApps },
+                    settingsRepository.get { enabledRepoIds },
+                ) { _, _ -> Unit }
+                    .drop(1)
+                    .debounce(5_000)
+                    .collect {
+                        if (autoBackupManager.isEnabled()) {
+                            autoBackupManager.performBackup(settingsRepository.getInitial())
+                        }
+                    }
             }
         }
     }

@@ -31,11 +31,13 @@ import com.looker.droidify.installer.installers.isShizukuInstalled
 import com.looker.droidify.installer.installers.requestPermissionListener
 import com.looker.droidify.utility.common.extension.asStateFlow
 import com.looker.droidify.utility.common.extension.updateAsMutable
+import com.looker.droidify.work.AutoBackupManager
 import com.looker.droidify.work.CleanUpWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.*
 import javax.inject.Inject
@@ -49,12 +51,18 @@ class SettingsViewModel @Inject constructor(
     private val privacyRepository: PrivacyRepository,
     private val repositoryExporter: RepositoryExporter,
     private val customButtonRepository: CustomButtonRepository,
+    private val autoBackupManager: AutoBackupManager,
     private val handler: StringHandler,
 ) : ViewModel() {
 
     val snackbarHostState = SnackbarHostState()
 
     val settings = settingsRepository.data.asStateFlow(Settings())
+
+    val autoBackupEnabled: StateFlow<Boolean> = autoBackupManager.enabled
+    val autoBackupFolder: StateFlow<String?> = autoBackupManager.treeUri
+        .map { autoBackupManager.getFolderDisplayName(it) }
+        .asStateFlow(autoBackupManager.getFolderDisplayName())
 
     val customButtons: StateFlow<List<CustomButton>> = customButtonRepository.buttons
         .asStateFlow(emptyList())
@@ -241,6 +249,25 @@ class SettingsViewModel @Inject constructor(
     fun exportSettings(uri: Uri) {
         viewModelScope.launch {
             settingsRepository.export(uri)
+        }
+    }
+
+    fun setAutoBackupEnabled(enabled: Boolean) {
+        autoBackupManager.setEnabled(enabled)
+        if (enabled && autoBackupManager.isEnabled()) {
+            viewModelScope.launch {
+                autoBackupManager.performBackup(settingsRepository.getInitial())
+            }
+        }
+    }
+
+    fun setAutoBackupTreeUri(uri: Uri?) {
+        autoBackupManager.setTreeUri(uri)
+        if (uri != null) {
+            autoBackupManager.setEnabled(true)
+            viewModelScope.launch {
+                autoBackupManager.performBackup(settingsRepository.getInitial())
+            }
         }
     }
 

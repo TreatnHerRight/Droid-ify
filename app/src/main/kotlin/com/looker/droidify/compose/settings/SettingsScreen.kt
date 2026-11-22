@@ -66,6 +66,8 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val autoBackupEnabled by viewModel.autoBackupEnabled.collectAsStateWithLifecycle()
+    val autoBackupFolder by viewModel.autoBackupFolder.collectAsStateWithLifecycle()
     val customButtons by viewModel.customButtons.collectAsStateWithLifecycle()
     val isBackgroundAllowed by viewModel.isBackgroundAllowed.collectAsStateWithLifecycle()
 
@@ -76,6 +78,10 @@ fun SettingsScreen(
     val exportSettingsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument(BACKUP_MIME_TYPE),
     ) { uri -> uri?.let { viewModel.exportSettings(it) } }
+
+    val backupFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri -> uri?.let { viewModel.setAutoBackupTreeUri(it) } }
 
     val importSettingsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -326,6 +332,29 @@ fun SettingsScreen(
             }
 
             item { SettingHeader(title = stringResource(R.string.import_export)) }
+
+            item {
+                SwitchSettingItem(
+                    title = stringResource(R.string.auto_backup_title),
+                    description = stringResource(R.string.auto_backup_DESC),
+                    checked = autoBackupEnabled,
+                    onCheckedChange = { enabled ->
+                        if (enabled && autoBackupFolder == null) {
+                            backupFolderLauncher.launch(null)
+                        } else {
+                            viewModel.setAutoBackupEnabled(enabled)
+                        }
+                    },
+                )
+            }
+
+            item {
+                ActionSettingItem(
+                    title = stringResource(R.string.auto_backup_folder_title),
+                    description = autoBackupFolder ?: stringResource(R.string.auto_backup_folder_not_set),
+                    onClick = { backupFolderLauncher.launch(null) },
+                )
+            }
 
             item {
                 ActionSettingItem(

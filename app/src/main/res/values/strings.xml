@@ -57,6 +57,10 @@
     <string name="error_shizuku_not_installed_DESC">Shizuku/Sui isn\'t installed</string>
 
     <string name="import_export">Backup and restore</string>
+    <string name="auto_backup_title">Automatic backups</string>
+    <string name="auto_backup_DESC">Automatically back up favourites and settings on changes and daily</string>
+    <string name="auto_backup_folder_title">Backup folder</string>
+    <string name="auto_backup_folder_not_set">No folder selected</string>
     <string name="import_settings_title">Import favourites and settings</string>
     <string name="import_settings_DESC">Import settings and favourites from a file</string>
     <string name="export_settings_title">Export favourites and settings</string>
