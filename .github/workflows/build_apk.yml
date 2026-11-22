@@ -129,6 +129,11 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
+      - name: Detect Android Build Tools
+        run: |
+          BT_VER=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
+          echo "BUILD_TOOLS_VERSION=$BT_VER" >> "$GITHUB_ENV"
+
       - name: Sign Release APK
         uses: r0adkll/sign-android-release@v1
         id: sign_app
@@ -162,7 +167,7 @@ jobs:
           prerelease: false
 
       - name: Notify Build Completion via ntfy
-        if: always()
+        if: always() && !cancelled()
         env:
           LOCAL_NTFY_URL: ${{ secrets.LOCAL_NTFY_URL }}
           LOCAL_NTFY_TOKEN: ${{ secrets.LOCAL_NTFY_TOKEN || secrets.NTFY_TOKEN }}
